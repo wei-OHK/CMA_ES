@@ -1,4 +1,4 @@
-//--- by WEI@OHK 2017-10-26 ---//
+//--- by WEI@OHK 2018-10-13 ---//
 package SparkJob;
 
 import java.util.Random;
@@ -28,7 +28,7 @@ import fr.inria.optimization.cmaes.CMAEvolutionStrategy;
 public class CMA_ES {
 	// Version numbers
 	public final static int VERSION_MAJOR = 1;
-	public final static int VERSION_MINOR = 0;
+	public final static int VERSION_MINOR = 1;
 
 	// Randgen
 	private static final Random randgen = new Random(System.currentTimeMillis());
@@ -43,6 +43,7 @@ public class CMA_ES {
 
 		//------------Log JobSettings--------------------------------------------------//
 		FSDataOutputStream os_argsLog = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/jobSettings.log"), true);
+		os_argsLog.write(("CMA_ESv" + VERSION_MAJOR + "." + VERSION_MINOR + " Application\n").getBytes("UTF-8"));
 		for(String value : args) {
 			os_argsLog.write((value+" ").getBytes("UTF-8"));
 		}
@@ -197,8 +198,8 @@ public class CMA_ES {
 			//-----------------------------------------------------------------------------//
 		}
 
-		//End of Program
-	    	System.exit(0);
+		//End of Program, problem occurred in Spark 2.x.x
+	    	//System.exit(0);
 	}
 
 
