@@ -1,4 +1,4 @@
-//--- by WEI@OHK 2018-10-13 ---//
+//--- by WEI@OHK 2018-10-20 ---//
 package SparkJob;
 
 import java.util.Random;
@@ -7,6 +7,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Date;
 import java.io.Serializable;
+import java.util.Comparator;
+import java.util.Collections;
 import java.text.SimpleDateFormat;
 
 import org.apache.hadoop.conf.Configuration;
@@ -28,7 +30,7 @@ import fr.inria.optimization.cmaes.CMAEvolutionStrategy;
 public class CMA_ES {
 	// Version numbers
 	public final static int VERSION_MAJOR = 1;
-	public final static int VERSION_MINOR = 1;
+	public final static int VERSION_MINOR = 2;
 
 	// Randgen
 	private static final Random randgen = new Random(System.currentTimeMillis());
@@ -52,7 +54,7 @@ public class CMA_ES {
 		//-----------------------------------------------------------------------------//
 
 		// Evaluator initialization
-		Evaluator evaluator = new Evaluator(settings.getNativeLib(), settings.getFuncIndex());
+		Evaluator evaluator = new Evaluator(settings.getNativeLib(), settings.getFuncIndex(), settings.getAddInfoLength());
 
 		// Spark initialization
 		JavaSparkContext sc = new JavaSparkContext(new SparkConf());
@@ -137,13 +139,13 @@ public class CMA_ES {
 
 				// Parallel evaluation
 				JavaRDD<double[]> input = sc.parallelize(pop);
-				JavaRDD<Double> output = input.map(evaluator);
-				List<Double> c_fitness = output.collect();
+				JavaRDD<EvaluationResult> output = input.map(evaluator);
+				List<EvaluationResult> c_fitness = output.collect();
 				for(int k = 0; k < pop.size(); k++)
-					fitness[k] = c_fitness.get(k) * -1.0;
+					fitness[k] = c_fitness.get(k).fitness * -1.0;
 
 				//------------Log meanx--------------------------------------------------------//
-				FSDataOutputStream os_mean_x = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/Trial_" + i + "/Generation_" + j + "/MeanX.log"), true);
+				FSDataOutputStream os_mean_x = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/Trial_" + i + "/Generation_" + j + "/MeanX.individual"), true);
 				double[] c_mean_x = cma.getMeanX();
 				for(int k = 0; k < c_mean_x.length; k++) {
 					os_mean_x.write(Double.toString(c_mean_x[k]).getBytes("UTF-8"));
@@ -158,7 +160,7 @@ public class CMA_ES {
 				cma.updateDistribution(fitness);
 
 				//------------Log bestx--------------------------------------------------------//
-				FSDataOutputStream os_best_x = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/Trial_" + i + "/Generation_" + j + "/BestX.log"), true);
+				FSDataOutputStream os_best_x = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/Trial_" + i + "/Generation_" + j + "/BestX.individual"), true);
 				double[] c_best_x = cma.getBestRecentX();
 				for(int k = 0; k < c_best_x.length; k++) {
 					os_best_x.write(Double.toString(c_best_x[k]).getBytes("UTF-8"));
@@ -167,6 +169,36 @@ public class CMA_ES {
 				}
 				os_best_x.write(("\n").getBytes("UTF-8"));
 				os_best_x.close();
+                
+				if(settings.getAddInfoLength() > 0) {
+					List<EvaluationResult> list = new ArrayList<EvaluationResult>(c_fitness);
+					Collections.sort(list, new Comparator<EvaluationResult>() {
+						public int compare(EvaluationResult result_1, EvaluationResult result_2) {
+							if(result_1.fitness > result_2.fitness) {
+								return -1;
+							} else if(result_1.fitness < result_2.fitness) {
+								return 1;
+							} else {
+								return 0;
+							}
+						}
+					});
+                    
+					FSDataOutputStream os_best_x_long = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/Trial_" + i + "/Generation_" + j + "/BestX.longValue"), true);
+					for(int k = 0; k < settings.getAddInfoLength(); k++) {
+						os_best_x_long.write(Long.toString(list.get(0).longValue[k]).getBytes("UTF-8"));
+						os_best_x_long.write(("\n").getBytes("UTF-8"));
+					}
+					os_best_x_long.close();
+                    
+                    
+					FSDataOutputStream os_best_x_double = FileSystem.get(new Configuration()).create(new Path(settings.getOutputPath() + "/Trial_" + i + "/Generation_" + j + "/BestX.doubleValue"), true);
+					for(int k = 0; k < settings.getAddInfoLength(); k++) {
+						os_best_x_double.write(Double.toString(list.get(0).doubleValue[k]).getBytes("UTF-8"));
+						os_best_x_double.write(("\n").getBytes("UTF-8"));
+					}
+					os_best_x_double.close();
+				}
 				//-----------------------------------------------------------------------------//
 				
 				//------------Log current generation-------------------------------------------//
@@ -197,24 +229,30 @@ public class CMA_ES {
 			os_overview.close();
 			//-----------------------------------------------------------------------------//
 		}
-
+        
 		//End of Program, problem occurred in Spark 2.x.x
-	    	//System.exit(0);
+		//System.exit(0);
 	}
 
 
 	/// Evaluator Class 
-	private static class Evaluator implements Serializable, Function<double[], Double> {
+	private static class Evaluator implements Serializable, Function<double[], EvaluationResult> {
 		// Constructor with job settings
-		Evaluator(String libName, int funcIndex) {
-			this.libName = libName;
-			this.funcIndex = funcIndex;
+		Evaluator(String lib_name, int func_index, int add_info_length) {
+			this.libName = lib_name;
+			this.funcIndex = func_index;
+
+			this.addInfoLength = add_info_length;
 		}
 
 		// Used for map transformation
-		public Double call(double[] x) {
+		public EvaluationResult call(double[] x) {
 			NativeLibLoader.setNativeLib(libName);
-			return NativeLibLoader.JOBNATIVELIB.INSTANCE.evaluateFcns(x, funcIndex);
+			long[] long_buffer = new long[addInfoLength];
+			double[] double_buffer = new double[addInfoLength];
+			double fitness = NativeLibLoader.JOBNATIVELIB.INSTANCE.evaluateFcns(x, funcIndex, long_buffer, double_buffer, addInfoLength);
+			EvaluationResult result = new EvaluationResult(fitness, long_buffer, double_buffer);
+			return result;
 		}
 
 		// Check individual feasibility
@@ -230,14 +268,14 @@ public class CMA_ES {
 		/// Native lib Loader
 		private static class NativeLibLoader {
 			// Set native library
-			public static void setNativeLib(String libName) {
-				NativeLibLoader.libName = libName;
+			public static void setNativeLib(String lib_name) {
+				NativeLibLoader.libName = lib_name;
 			}
 
 			// JNA interface
 			public interface JOBNATIVELIB extends Library {
 				JOBNATIVELIB INSTANCE = (JOBNATIVELIB)Native.loadLibrary(libName, JOBNATIVELIB.class);
-				double evaluateFcns(double individual[], int func_index);
+				double evaluateFcns(double individual[], int func_index, long long_buffer[], double double_buffer[], int add_info_length);
 			}
 
 			private static String libName;
@@ -245,8 +283,24 @@ public class CMA_ES {
 	
 		private final String libName;
 		private final int funcIndex;
+        
+		private final int addInfoLength;
 	}
 
+	/// Evaluation Result Class
+	private static class EvaluationResult implements Serializable {
+		// Constructor with results
+		EvaluationResult(double fitness, long[] long_buffer, double[] double_buffer) {
+			this.fitness = fitness;
+			this.longValue = long_buffer;
+			this.doubleValue = double_buffer;
+		}
+        
+		// Results
+		public double fitness;
+		public long[] longValue;
+		public double[] doubleValue;
+	}
 
 	/// Job Settings Class
 	private static class JobSettings {
@@ -268,7 +322,8 @@ public class CMA_ES {
 			dimensions[0] = 300;
 			upperBounds[0] = 1.0;
 			lowerBounds[0] = -1.0;
-			initialsd[0] = 0.5;	
+			initialsd[0] = 0.5;
+			addInfoLength = 0;
 		}
 
 		// Constructor with args
@@ -316,6 +371,9 @@ public class CMA_ES {
 								initialsd[j] = Double.parseDouble(D_CONF[3]);
 							}
 							break;
+						case "-ADD_INFO_LENGTH":
+							setAddInfoLength(Integer.parseInt(args[++i]));
+							break;
 						default:
 							System.err.println("Undefined option: '" + args[i] + "'");
 							throw new Exception(); 
@@ -325,33 +383,35 @@ public class CMA_ES {
 				System.err.println("Unknown command");
 				System.err.println("Usage: spark-submit --num-executors NUM --files LIBNAME --name APPNAME CMA_ESv" + VERSION_MAJOR + "." + VERSION_MINOR + ".jar [<option>..]");
 				System.err.println("Options (* must be specified):");
-				System.err.println("-OUTPUTPATH <PATH>			: Path for Outputs.");
-				System.err.println("-LIB <NAME> (*)			: Name of native library.");
-				System.err.println("-FUNC_INDEX <NUM>			: Index of function in native library to be used.");
-				System.err.println("-TRIALS <NUM>			: Number of trials");
-				System.err.println("-G <NUM>				: Max generation.");
-				System.err.println("-LAMBDA <NUM>			: Population size.");
-				System.err.println("-D_FORMAT <@SEE SAMPLES>		: Describe the individual.");
+				System.err.println("-OUTPUT_PATH <PATH>         : Path for outputs.");
+				System.err.println("-LIB <NAME> (*)             : Name of native library.");
+				System.err.println("-FUNC_INDEX <NUM>           : Index of function in native library to be used.");
+				System.err.println("-TRIALS <NUM>               : Number of trials");
+				System.err.println("-G <NUM>                    : Max generation.");
+				System.err.println("-LAMBDA <NUM>               : Population size.");
+				System.err.println("-D_FORMAT <@SEE SAMPLES>    : Describe the individual.");
+				System.err.println("-ADD_INFO_LENGTH <NUM>      : Length of additional information for each individual.");
 				
 				System.exit(-1);
 			}
 		}
 		
 		// Spark Task Parameters
-		private String outputPath;			//path for outputs
-		private String nativeLib;			//native library used for evaluation
-		private int funcIndex;				//index of function in native library to be used
-		
+		private String outputPath;		//path for outputs
+		private String nativeLib;		//native library used for evaluation
+		private int funcIndex;			//index of function in native library to be used
+        
 		// CMA_ES Parameters
-		private int trialsNum;				//number of trials
-		private int maxGeneration;			//max generation
-		private int lambda;				//population size
+		private int trialsNum;			//number of trials
+		private int maxGeneration;		//max generation
+		private int lambda;			//population size
 
 		// Individual Parameters
-		private int[] dimensions;			//dimensions
-		private double[] upperBounds;			//upper_bounds of individual
-		private double[] lowerBounds;			//lower_bounds of individual
-		private double[] initialsd;			//initial standard deviation
+		private int[] dimensions;		//dimensions
+		private double[] upperBounds;		//upper_bounds of individual
+		private double[] lowerBounds;		//lower_bounds of individual
+		private double[] initialsd;		//initial standard deviation
+		private int addInfoLength;		//length of additional information per individual
 		
 		// Getters
 		public String getOutputPath() {
@@ -384,6 +444,9 @@ public class CMA_ES {
 		public double[] getInitialsd() {
 			return initialsd;
 		}
+		public int getAddInfoLength() {
+			return addInfoLength;
+		}
 		
 		// Setters
 		public void setOutputPath(final String value) {
@@ -415,6 +478,9 @@ public class CMA_ES {
 		}
 		public void setInitialsd(final double[] value) {
 			initialsd = value;
+		}
+		public void setAddInfoLength(final int value) {
+			addInfoLength = value;
 		}
 	}
 }
